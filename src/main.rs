@@ -15,7 +15,7 @@ const HIDDEN_SIZE: usize = 512;   // neuronas del LSTM
 const SEQ_LEN: usize = 128;       // cuantos caracteres ve por secuencia
 const BATCH_SIZE: usize = 32;     // cuantas secuencias en paralelo
 const LEARNING_RATE: f64 = 0.001; // tasa de aprendizaje
-const EPOCHS: usize = 50;         // vueltas al texto
+const EPOCHS: usize = 5;         // vueltas al texto
 const GEN_LEN: usize = 500;      // caracteres a generar
 
 // traduce caracteres a ids y viceversa
