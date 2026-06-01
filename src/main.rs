@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 
 use candle_core::{Device, Result, Tensor, DType};
 use candle_nn::{
@@ -9,12 +10,13 @@ use candle_nn::{
 use rand::Rng;
 
 // hiperparametros
-const EMBED_SIZE: usize = 128;    // dimension del vector de cada caracter
-const HIDDEN_SIZE: usize = 256;   // neuronas del LSTM
-const SEQ_LEN: usize = 64;        // cuantos caracteres ve por tanda
-const LEARNING_RATE: f64 = 0.003; // tasa de aprendizaje
-const EPOCHS: usize = 20;         // vueltas al texto
-const GEN_LEN: usize = 500;       // caracteres a generar
+const EMBED_SIZE: usize = 256;    // dimension del vector de cada caracter
+const HIDDEN_SIZE: usize = 512;   // neuronas del LSTM
+const SEQ_LEN: usize = 128;       // cuantos caracteres ve por secuencia
+const BATCH_SIZE: usize = 32;     // cuantas secuencias en paralelo
+const LEARNING_RATE: f64 = 0.001; // tasa de aprendizaje
+const EPOCHS: usize = 50;         // vueltas al texto
+const GEN_LEN: usize = 500;      // caracteres a generar
 
 // traduce caracteres a ids y viceversa
 struct Tokenizer {
@@ -50,6 +52,27 @@ impl Tokenizer {
     fn decode(&self, ids: &[u32]) -> String {
         ids.iter().map(|&i| self.itos[i as usize]).collect()
     }
+
+
+
+    fn save(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let s: String = self.itos.iter().collect();
+        fs::write(path, s)?;
+        Ok(())
+    }
+
+
+    fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let s = fs::read_to_string(path)?;
+        let itos: Vec<char> = s.chars().collect();
+        let stoi = itos
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (*c, i as u32))
+            .collect();
+
+        Ok(Self {stoi, itos})
+    }
 }
 
 // red neuronal: embedding → lstm → linear
@@ -68,29 +91,34 @@ impl CharRNN {
         Ok(Self { embedding, lstm, head })
     }
 
-    // procesa una secuencia completa de ids y devuelve logits para cada posicion
+    // procesa un batch completo de secuencias y devuelve logits para cada posicion
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = self.embedding.forward(x)?;      // (1, 64) → (1, 64, 128)
-        let states = self.lstm.seq(&x)?;          // LSTM paso a paso, devuelve estados
-        let x = self.lstm.states_to_tensor(&states)?; // estados → (1, 64, 256)
-        self.head.forward(&x)                     // (1, 64, 256) → (1, 64, vocabulario)
+        let x = self.embedding.forward(x)?;      
+        let states = self.lstm.seq(&x)?;        
+        let x = self.lstm.states_to_tensor(&states)?; 
+        self.head.forward(&x)                 
     }
 }
 
-// elige un pedazo random del texto: input = chars[i..i+64], target = chars[i+1..i+65]
-fn get_batch(data: &[u32], rng: &mut impl Rng) -> (Vec<u32>, Vec<u32>) {
-    let max_start = data.len().saturating_sub(SEQ_LEN + 1);
-    if max_start == 0 {
-        return (vec![0u32; SEQ_LEN], vec![0u32; SEQ_LEN]);
+// elige BATCH_SIZE pedazos random del texto
+// cada batch tiene input = chars[i..i+SEQ_LEN], target = chars[i+1..i+SEQ_LEN+1]
+fn get_batch(data: &[u32], seq_len: usize, batch_size: usize, rng: &mut impl Rng) -> (Vec<u32>, Vec<u32>) {
+    let max_start = data.len().saturating_sub(seq_len + 1);
+    let mut xs = Vec::with_capacity(batch_size * seq_len);
+    let mut ys = Vec::with_capacity(batch_size * seq_len);
+    for _ in 0..batch_size {
+        let start = if max_start > 0 {
+            rng.gen_range(0..max_start)
+        } else {
+            0
+        };
+        xs.extend_from_slice(&data[start..start + seq_len]);
+        ys.extend_from_slice(&data[start + 1..start + seq_len + 1]);
     }
-    let start = rng.gen_range(0..max_start);
-    (
-        data[start..start + SEQ_LEN].to_vec(),
-        data[start + 1..start + SEQ_LEN + 1].to_vec(),
-    )
+    (xs, ys)
 }
 
-// softmax con temperatura + sampleo probabilistico
+// softmax con temperatura ysampleo probabilistico
 fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
     let scaled: Vec<f32> = logits
         .iter()
@@ -116,31 +144,31 @@ fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap>
 
     let mut opt = AdamW::new_lr(varmap.all_vars(), LEARNING_RATE)?;
     let mut rng = rand::thread_rng();
-    let max_steps = 200;
-    let steps = (data.len() / SEQ_LEN).min(max_steps).max(1);
-    if data.len() < SEQ_LEN * 2 {
-        eprintln!("warn: texto muy corto ({})", data.len());
+    let seq_len = SEQ_LEN.min(data.len() / 2);
+    let batch_size = BATCH_SIZE.min(data.len() / seq_len.max(1));
+    if seq_len < 8 {
+        eprintln!("error: texto demasiado corto ({})", data.len());
+        std::process::exit(1);
     }
+    let max_steps = 500;
 
     for epoch in 0..EPOCHS {
         let mut total_loss = 0.0f32;
-        for i in 0..steps {
-            let (xs, ys) = get_batch(data, &mut rng);
-            let xs = Tensor::from_slice(&xs, (1, SEQ_LEN), device)?;
-            let ys = Tensor::from_slice(&ys, (1, SEQ_LEN), device)?;
+        for i in 0..max_steps {
+            let (xs, ys) = get_batch(data, seq_len, batch_size, &mut rng);
+            let xs = Tensor::from_slice(&xs, (batch_size, seq_len), device)?;
+            let ys = Tensor::from_slice(&ys, (batch_size, seq_len), device)?;
 
-            // forward: predice el siguiente caracter para cada posicion
-            let logits = model.forward(&xs)?;
-            // cross-entropy: que tan lejos esta la prediccion del real
-            let loss = loss::cross_entropy(
-                &logits.reshape((SEQ_LEN, tokenizer.vocab_size()))?,
-                &ys.reshape((SEQ_LEN,))?,
+            let logits = model.forward(&xs)?;// forward: predice el siguiente caracter para cada posicion
+            let loss = loss::cross_entropy(  // cross-entropy: que tan lejos esta la prediccion del real
+                &logits.reshape((batch_size * seq_len, tokenizer.vocab_size()))?,
+                &ys.reshape((batch_size * seq_len,))?,
             )?;
-            // backward + adamw: ajusta pesos segun el error
+            // backward y adamw ajustab pesos segun el error
             opt.backward_step(&loss)?;
             total_loss += loss.to_scalar::<f32>()?;
 
-            if i > 0 && i % 50 == 0 {
+            if i > 0 && i % 100 == 0 {
                 print!(".");
                 std::io::stdout().flush().ok();
             }
@@ -148,7 +176,7 @@ fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap>
         println!(
             " epoch {:>3} loss: {:.6}",
             epoch,
-            total_loss / steps as f32
+            total_loss / max_steps as f32
         );
     }
     Ok(varmap)
@@ -204,32 +232,60 @@ fn generate(
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("uso: {} <archivo.txt> [prompt]", args[0]);
-        std::process::exit(1);
-    }
+    let load = args.iter().any(|a| a == "--load");
 
-    // lee el archivo de texto
-    let text = fs::read_to_string(&args[1])?;
     let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
     println!("usando: {device:?}");
-    println!("caracteres: {}", text.chars().count());
 
-    // prepara el tokenizer y codifica el texto a ids
-    let tokenizer = Tokenizer::new(&text);
-    println!("vocabulario: {} caracteres", tokenizer.vocab_size());
+    let model_path = "modelo.safetensors";
+    let vocab_path = "modelo.vocab";
+    let saved_exists = Path::new(model_path).exists() && Path::new(vocab_path).exists();
 
-    let data = tokenizer.encode(&text);
-    println!("entrenando...");
-    let varmap = train(&device, &tokenizer, &data)?;
-
-    let prompt = if args.len() > 2 {
-        args[2].clone()
+    let (tokenizer, varmap) = if load || saved_exists {
+        if !saved_exists {
+            eprintln!("error: no hay modelo guardado. entrená uno primero.");
+            std::process::exit(1);
+        }
+        println!("cargando modelo guardado...");
+        let tokenizer = Tokenizer::load(vocab_path)?;
+        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
+        let mut varmap = VarMap::new();
+        let _model = CharRNN::new(
+            tokenizer.vocab_size(),
+            &VarBuilder::from_varmap(&varmap, DType::F32, &device),
+        )?;
+        varmap.load(model_path)?;
+        (tokenizer, varmap)
     } else {
-        String::new()
+        if args.len() < 2 || args[1].starts_with('-') {
+            eprintln!("uso: {} <archivo.txt> [prompt]", args[0]);
+            eprintln!("      {} --load [prompt]", args[0]);
+            std::process::exit(1);
+        }
+        let text = fs::read_to_string(&args[1])?;
+        println!("caracteres: {}", text.chars().count());
+        let tokenizer = Tokenizer::new(&text);
+        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
+        let data = tokenizer.encode(&text);
+        println!("entrenando...");
+        let start = std::time::Instant::now();
+        let varmap = train(&device, &tokenizer, &data)?;
+        let elapsed = start.elapsed();
+        println!("entrenamiento completo en {:.2?}", elapsed); //guarda todo para poder cargarlo despues sin entrenar de nuevo
+        varmap.save(model_path)?;
+        tokenizer.save(vocab_path)?;
+        println!("modelo guardado en {model_path}");
+        (tokenizer, varmap)
     };
 
-    println!("\n--- generacion ---\n");
+    let prompt = if load {  //si se cargo un modelo, el prompt va despues de --load
+        let pos = args.iter().position(|a| a == "--load").unwrap();
+        args.get(pos + 1).cloned().unwrap_or_default()
+    } else {
+        args.get(2).cloned().unwrap_or_default()
+    };
+
+    println!("\n--- generacion ---\n"); // genera texto desde el prompt usando el modelo entrenado o cargado
     let output = generate(&device, &tokenizer, &varmap, &prompt, GEN_LEN)?;
     println!("{output}");
 
