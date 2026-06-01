@@ -1,0 +1,9 @@
+[package]
+name = "nano-net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+candle-core = "0.10.2"
+candle-nn = "0.10.2"
+rand = "0.8"
