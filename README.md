@@ -1,4 +1,4 @@
-![pengui-redn banner](pengui-redn-banner.svg)
+
 
 # pengui-redn
 
