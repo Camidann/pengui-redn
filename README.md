@@ -10,16 +10,16 @@ Le pasas un archivo de texto, aprende solo, y despues genera texto nuevo que se 
 
 ```bash
 # entrenar con un txt
-cargo run -- libro.txt
+cargo run -- <file.txt>
 
 # entrenar y generar desde un prompt
-cargo run -- libro.txt "habia una vez"
+cargo run -- <file.txt> "prompt"
 
 # cargar modelo guardado
 cargo run -- --load
 
 # cargar modelo guardado y pasarle prompt
-cargo run -- --load "en un lugar de la mancha"
+cargo run -- --load "prompt"
 ```
 
 ## Que hace cada parte
