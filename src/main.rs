@@ -9,81 +9,107 @@ use candle_nn::{
 };
 use rand::Rng;
 
-// hiperparametros
-const EMBED_SIZE: usize = 256;    // dimension del vector de cada caracter
-const HIDDEN_SIZE: usize = 512;   // neuronas del LSTM
-const SEQ_LEN: usize = 128;       // cuantos caracteres ve por secuencia
-const BATCH_SIZE: usize = 32;     // cuantas secuencias en paralelo
-const LEARNING_RATE: f64 = 0.001; // tasa de aprendizaje
-const EPOCHS: usize = 5;         // vueltas al texto
-const GEN_LEN: usize = 500;      // caracteres a generar
+const EMBED_SIZE: usize = 256;
+const HIDDEN_SIZE: usize = 512;
+const SEQ_LEN: usize = 32;
+const BATCH_SIZE: usize = 32;
+const LEARNING_RATE: f64 = 0.001;
+const EPOCHS: usize = 100;
+const GEN_LEN: usize = 50;
+const UNK_TOKEN: &str = "<UNK>";
 
-// traduce caracteres a ids y viceversa
 struct Tokenizer {
-    stoi: HashMap<char, u32>, // caracter → id
-    itos: Vec<char>,          // id → caracter
+    stoi: HashMap<String, u32>,
+    itos: Vec<String>,
 }
 
-impl Tokenizer {
-    // construye el vocabulario con los caracteres unicos del texto
+fn split_off_punct(word: &str) -> Vec<String> { //separa palabras de signos de puntuación, manteniendo ambos como tokens separados
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut kind = None;
+    for c in word.chars() {
+        let k = c.is_alphabetic();
+        match kind {
+            Some(k2) if k2 != k => {
+                pieces.push(current);
+                current = String::new();
+            }
+            _ => {}
+        }
+        current.push(c);
+        kind = Some(k);
+    }
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+    pieces
+}
+
+fn tokenize(text: &str) -> Vec<String> { //tokeniza el texto, separando por espacios y signos de puntuación, y convirtiendo a minúsculas
+    text.split_whitespace()
+        .flat_map(|w| split_off_punct(w))
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+impl Tokenizer { //crea un tokenizador a partir de un texto, construyendo el vocabulario y las tablas de conversión entre palabras e índices
     fn new(text: &str) -> Self {
-        let mut chars: Vec<char> = text.chars().collect();
-        chars.sort();
-        chars.dedup();
-        let itos = chars;
-        let stoi: HashMap<char, u32> = itos
+        let mut words: Vec<String> = tokenize(text);
+        words.sort();
+        words.dedup();
+        let mut itos = vec![UNK_TOKEN.to_string()];
+        itos.extend(words);
+        let stoi: HashMap<String, u32> = itos
             .iter()
             .enumerate()
-            .map(|(i, c)| (*c, i as u32))
+            .map(|(i, w)| (w.clone(), i as u32))
             .collect();
         Self { stoi, itos }
     }
 
-    fn vocab_size(&self) -> usize {
+    fn vocab_size(&self) -> usize { //devuelve el tamaño del vocabulario, que es la cantidad de tokens únicos que el tokenizador puede manejar
         self.itos.len()
     }
 
-    // texto → ids
-    fn encode(&self, text: &str) -> Vec<u32> {
-        text.chars().filter_map(|c| self.stoi.get(&c).copied()).collect()
+    fn encode(&self, text: &str) -> Vec<u32> { 
+        tokenize(text)
+            .iter()
+            .map(|w| *self.stoi.get(w).unwrap_or(&0))
+            .collect()
     }
 
-    // ids → texto
-    fn decode(&self, ids: &[u32]) -> String {
-        ids.iter().map(|&i| self.itos[i as usize]).collect()
+    fn decode(&self, ids: &[u32]) -> String { 
+        ids.iter()
+            .map(|&i| self.itos[i as usize].as_str())
+            .collect::<Vec<&str>>()
+            .join(" ")
     }
 
-
-
-    fn save(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
-        let s: String = self.itos.iter().collect();
+    fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let s = self.itos.join("\n");
         fs::write(path, s)?;
         Ok(())
     }
 
-
-    fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
+    fn load(path: impl AsRef<Path>) -> Result<Self> {
         let s = fs::read_to_string(path)?;
-        let itos: Vec<char> = s.chars().collect();
+        let itos: Vec<String> = s.lines().map(|l| l.to_string()).collect();
         let stoi = itos
             .iter()
             .enumerate()
-            .map(|(i, c)| (*c, i as u32))
+            .map(|(i, w)| (w.clone(), i as u32))
             .collect();
-
-        Ok(Self {stoi, itos})
+        Ok(Self { stoi, itos })
     }
 }
 
-// red neuronal: embedding → lstm → linear
 struct CharRNN {
-    embedding: Embedding, // vocabulario → vector de 128
-    lstm: LSTM,           // 128 → 256 con memoria interna
-    head: Linear,         // 256 → vocabulario (predice el proximo caracter)
+    embedding: Embedding,
+    lstm: LSTM,
+    head: Linear,
 }
 
 impl CharRNN {
-    // crea las 3 capas con los pesos del VarBuilder
     fn new(vocab_size: usize, vb: &VarBuilder) -> Result<Self> {
         let embedding = candle_nn::embedding(vocab_size, EMBED_SIZE, vb.pp("embed"))?;
         let lstm = LSTM::new(EMBED_SIZE, HIDDEN_SIZE, LSTMConfig::default(), vb.pp("lstm"))?;
@@ -91,34 +117,26 @@ impl CharRNN {
         Ok(Self { embedding, lstm, head })
     }
 
-    // procesa un batch completo de secuencias y devuelve logits para cada posicion
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = self.embedding.forward(x)?;      
-        let states = self.lstm.seq(&x)?;        
-        let x = self.lstm.states_to_tensor(&states)?; 
-        self.head.forward(&x)                 
+        let x = self.embedding.forward(x)?;
+        let states = self.lstm.seq(&x)?;
+        let x = self.lstm.states_to_tensor(&states)?;
+        self.head.forward(&x)
     }
 }
 
-// elige BATCH_SIZE pedazos random del texto
-// cada batch tiene input = chars[i..i+SEQ_LEN], target = chars[i+1..i+SEQ_LEN+1]
 fn get_batch(data: &[u32], seq_len: usize, batch_size: usize, rng: &mut impl Rng) -> (Vec<u32>, Vec<u32>) {
     let max_start = data.len().saturating_sub(seq_len + 1);
     let mut xs = Vec::with_capacity(batch_size * seq_len);
     let mut ys = Vec::with_capacity(batch_size * seq_len);
     for _ in 0..batch_size {
-        let start = if max_start > 0 {
-            rng.gen_range(0..max_start)
-        } else {
-            0
-        };
+        let start = if max_start > 0 { rng.gen_range(0..max_start) } else { 0 };
         xs.extend_from_slice(&data[start..start + seq_len]);
         ys.extend_from_slice(&data[start + 1..start + seq_len + 1]);
     }
     (xs, ys)
 }
 
-// softmax con temperatura ysampleo probabilistico
 fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
     let scaled: Vec<f32> = logits
         .iter()
@@ -136,7 +154,6 @@ fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
     (scaled.len() - 1) as u32
 }
 
-// loop de entrenamiento
 fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap> {
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
@@ -150,23 +167,22 @@ fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap>
         eprintln!("error: texto demasiado corto ({})", data.len());
         std::process::exit(1);
     }
-    let max_steps = 500;
+
+    let steps_per_epoch = (data.len() / (seq_len * batch_size)).max(20);
 
     for epoch in 0..EPOCHS {
-        let mut total_loss = 0.0f32;
-        for i in 0..max_steps {
+        let mut total_loss = Tensor::new(0.0f32, device)?;
+        for i in 0..steps_per_epoch {
             let (xs, ys) = get_batch(data, seq_len, batch_size, &mut rng);
             let xs = Tensor::from_slice(&xs, (batch_size, seq_len), device)?;
             let ys = Tensor::from_slice(&ys, (batch_size, seq_len), device)?;
-
-            let logits = model.forward(&xs)?;// forward: predice el siguiente caracter para cada posicion
-            let loss = loss::cross_entropy(  // cross-entropy: que tan lejos esta la prediccion del real
+            let logits = model.forward(&xs)?;
+            let loss = loss::cross_entropy(
                 &logits.reshape((batch_size * seq_len, tokenizer.vocab_size()))?,
                 &ys.reshape((batch_size * seq_len,))?,
             )?;
-            // backward y adamw ajustab pesos segun el error
             opt.backward_step(&loss)?;
-            total_loss += loss.to_scalar::<f32>()?;
+            total_loss = total_loss.add(&loss.detach())?;
 
             if i > 0 && i % 100 == 0 {
                 print!(".");
@@ -176,13 +192,12 @@ fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap>
         println!(
             " epoch {:>3} loss: {:.6}",
             epoch,
-            total_loss / max_steps as f32
+            total_loss.to_scalar::<f32>()? / steps_per_epoch as f32
         );
     }
     Ok(varmap)
 }
 
-// genera texto autoregresivamente desde un prompt
 fn generate(
     device: &Device,
     tokenizer: &Tokenizer,
@@ -199,7 +214,6 @@ fn generate(
     }
     let mut generated = prompt_ids.clone();
 
-    // feedea el prompt para inicializar el estado del lstm
     let mut state = model.lstm.zero_state(1)?;
     for &id in &prompt_ids {
         let emb = model
@@ -209,7 +223,6 @@ fn generate(
         state = model.lstm.step(&emb, &state)?;
     }
 
-    // genera autoregresivamente: el output de un paso es el input del siguiente
     let mut last_id = *prompt_ids.last().unwrap();
     for _ in 0..gen_len {
         let emb = model
@@ -217,12 +230,10 @@ fn generate(
             .forward(&Tensor::from_slice(&[last_id], (1, 1), device)?)?;
         let emb = emb.squeeze(1)?;
         state = model.lstm.step(&emb, &state)?;
-        // el hidden state h se proyecta a logits del vocabulario
         let logits = model
             .head
             .forward(&state.h.unsqueeze(0)?)?;
         let logits_vec = logits.squeeze(0)?.squeeze(0)?.to_vec1::<f32>()?;
-        // samplea el proximo caracter segun la probabilidad
         last_id = sample(&logits_vec, 0.8, &mut rng);
         generated.push(last_id);
     }
@@ -233,6 +244,7 @@ fn generate(
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let load = args.iter().any(|a| a == "--load");
+    let has_file = args.len() >= 2 && !args[1].starts_with('-');
 
     let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
     println!("usando: {device:?}");
@@ -241,14 +253,41 @@ fn main() -> Result<()> {
     let vocab_path = "modelo.vocab";
     let saved_exists = Path::new(model_path).exists() && Path::new(vocab_path).exists();
 
-    let (tokenizer, varmap) = if load || saved_exists {
+    let (tokenizer, varmap) = if load {
         if !saved_exists {
             eprintln!("error: no hay modelo guardado. entrená uno primero.");
             std::process::exit(1);
         }
         println!("cargando modelo guardado...");
         let tokenizer = Tokenizer::load(vocab_path)?;
-        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
+        println!("vocabulario: {} palabras", tokenizer.vocab_size());
+        let mut varmap = VarMap::new();
+        let _model = CharRNN::new(
+            tokenizer.vocab_size(),
+            &VarBuilder::from_varmap(&varmap, DType::F32, &device),
+        )?;
+        varmap.load(model_path)?;
+        (tokenizer, varmap)
+    } else if has_file {
+        let text = fs::read_to_string(&args[1])?;
+        println!("caracteres: {}", text.chars().count());
+        let tokenizer = Tokenizer::new(&text);
+        println!("vocabulario: {} palabras", tokenizer.vocab_size());
+        let data = tokenizer.encode(&text);
+        println!("tokens totales: {}", data.len());
+        println!("entrenando...");
+        let start = std::time::Instant::now();
+        let varmap = train(&device, &tokenizer, &data)?;
+        let elapsed = start.elapsed();
+        println!("entrenamiento completo en {:.2?}", elapsed);
+        varmap.save(model_path)?;
+        tokenizer.save(vocab_path)?;
+        println!("modelo guardado en {model_path}");
+        (tokenizer, varmap)
+    } else if saved_exists {
+        println!("cargando modelo guardado...");
+        let tokenizer = Tokenizer::load(vocab_path)?;
+        println!("vocabulario: {} palabras", tokenizer.vocab_size());
         let mut varmap = VarMap::new();
         let _model = CharRNN::new(
             tokenizer.vocab_size(),
@@ -257,35 +296,19 @@ fn main() -> Result<()> {
         varmap.load(model_path)?;
         (tokenizer, varmap)
     } else {
-        if args.len() < 2 || args[1].starts_with('-') {
-            eprintln!("uso: {} <archivo.txt> [prompt]", args[0]);
-            eprintln!("      {} --load [prompt]", args[0]);
-            std::process::exit(1);
-        }
-        let text = fs::read_to_string(&args[1])?;
-        println!("caracteres: {}", text.chars().count());
-        let tokenizer = Tokenizer::new(&text);
-        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
-        let data = tokenizer.encode(&text);
-        println!("entrenando...");
-        let start = std::time::Instant::now();
-        let varmap = train(&device, &tokenizer, &data)?;
-        let elapsed = start.elapsed();
-        println!("entrenamiento completo en {:.2?}", elapsed); //guarda todo para poder cargarlo despues sin entrenar de nuevo
-        varmap.save(model_path)?;
-        tokenizer.save(vocab_path)?;
-        println!("modelo guardado en {model_path}");
-        (tokenizer, varmap)
+        eprintln!("uso: {} <archivo.txt> [prompt]", args[0]);
+        eprintln!("      {} --load [prompt]", args[0]);
+        std::process::exit(1);
     };
 
-    let prompt = if load {  //si se cargo un modelo, el prompt va despues de --load
+    let prompt = if load {
         let pos = args.iter().position(|a| a == "--load").unwrap();
         args.get(pos + 1).cloned().unwrap_or_default()
     } else {
         args.get(2).cloned().unwrap_or_default()
     };
 
-    println!("\n--- generacion ---\n"); // genera texto desde el prompt usando el modelo entrenado o cargado
+    println!("\n--- generacion ---\n");
     let output = generate(&device, &tokenizer, &varmap, &prompt, GEN_LEN)?;
     println!("{output}");
 
