@@ -10,16 +10,16 @@ Le pasas un archivo de texto, aprende solo, y despues genera texto nuevo que se 
 
 ```bash
 # entrenar con un txt
-cargo run -- <file.txt>
+cargo run --release libro.txt
 
 # entrenar y generar desde un prompt
-cargo run -- <file.txt> "prompt"
+cargo run --release libro.txt "habia una vez"
 
 # cargar modelo guardado
-cargo run -- --load
+cargo run --release --load
 
 # cargar modelo guardado y pasarle prompt
-cargo run -- --load "prompt"
+cargo run --release--load "en un lugar de la mancha"
 ```
 
 ## Que hace cada parte
@@ -121,4 +121,4 @@ src/main.rs
 
 ## Disclaimer
 
-Es un proyecto para aprender, no esperes un GPT. Genera texto que se parece al original pero no tiene sentido profundo. Para eso necesitarias transformers y billones de parametros, esto es mas bien una demo didactica.
+Este es un proyecto didactico, no esperes crear el proximo Claude.

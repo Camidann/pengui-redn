@@ -14,7 +14,7 @@ const HIDDEN_SIZE: usize = 512;
 const SEQ_LEN: usize = 32;
 const BATCH_SIZE: usize = 32;
 const LEARNING_RATE: f64 = 0.001;
-const EPOCHS: usize = 100;
+const EPOCHS: usize = 150;
 const GEN_LEN: usize = 50;
 const UNK_TOKEN: &str = "<UNK>";
 
@@ -23,7 +23,7 @@ struct Tokenizer {
     itos: Vec<String>,
 }
 
-fn split_off_punct(word: &str) -> Vec<String> { //separa palabras de signos de puntuación, manteniendo ambos como tokens separados
+fn split_off_punct(word: &str) -> Vec<String> { //separo palabras de signos de puntuación así no se pegan
     let mut pieces = Vec::new();
     let mut current = String::new();
     let mut kind = None;
@@ -45,14 +45,14 @@ fn split_off_punct(word: &str) -> Vec<String> { //separa palabras de signos de p
     pieces
 }
 
-fn tokenize(text: &str) -> Vec<String> { //tokeniza el texto, separando por espacios y signos de puntuación, y convirtiendo a minúsculas
+fn tokenize(text: &str) -> Vec<String> { //convierto el texto a tokens: minúsculas, separado por espacios y puntuación
     text.split_whitespace()
         .flat_map(|w| split_off_punct(w))
         .map(|t| t.to_lowercase())
         .collect()
 }
 
-impl Tokenizer { //crea un tokenizador a partir de un texto, construyendo el vocabulario y las tablas de conversión entre palabras e índices
+impl Tokenizer { //construyo el vocabulario: mapeo palabra -> id y id -> palabra
     fn new(text: &str) -> Self {
         let mut words: Vec<String> = tokenize(text);
         words.sort();
@@ -67,18 +67,18 @@ impl Tokenizer { //crea un tokenizador a partir de un texto, construyendo el voc
         Self { stoi, itos }
     }
 
-    fn vocab_size(&self) -> usize { //devuelve el tamaño del vocabulario, que es la cantidad de tokens únicos que el tokenizador puede manejar
+    fn vocab_size(&self) -> usize { //cuántas palabras distintas conoce el modelo
         self.itos.len()
     }
 
-    fn encode(&self, text: &str) -> Vec<u32> { 
+    fn encode(&self, text: &str) -> Vec<u32> { //texto -> lista de ids
         tokenize(text)
             .iter()
             .map(|w| *self.stoi.get(w).unwrap_or(&0))
             .collect()
     }
 
-    fn decode(&self, ids: &[u32]) -> String { 
+    fn decode(&self, ids: &[u32]) -> String { //ids -> texto de vuelta
         ids.iter()
             .map(|&i| self.itos[i as usize].as_str())
             .collect::<Vec<&str>>()
@@ -138,20 +138,31 @@ fn get_batch(data: &[u32], seq_len: usize, batch_size: usize, rng: &mut impl Rng
 }
 
 fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
-    let scaled: Vec<f32> = logits
+    let mut scaled: Vec<(usize, f32)> = logits
         .iter()
         .map(|&l| (l / temperature).exp())
+        .enumerate()
         .collect();
-    let sum: f32 = scaled.iter().sum();
-    let mut lum = 0.0;
+    let sum: f32 = scaled.iter().map(|(_, p)| p).sum();
+    for (_, p) in scaled.iter_mut() {
+        *p /= sum;
+    }
+    scaled.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let top_k = 10.min(scaled.len());
+    let mut top = scaled[..top_k].to_vec();
+    let norm: f32 = top.iter().map(|(_, p)| p).sum();
+    for (_, p) in top.iter_mut() {
+        *p /= norm;
+    }
+    let mut cum = 0.0;
     let r: f32 = rng.r#gen();
-    for (i, &p) in scaled.iter().enumerate() {
-        lum += p / sum;
-        if r < lum {
-            return i as u32;
+    for (i, p) in top.iter() {
+        cum += p;
+        if r < cum {
+            return *i as u32;
         }
     }
-    (scaled.len() - 1) as u32
+    top.last().unwrap().0 as u32
 }
 
 fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap> {
@@ -234,7 +245,7 @@ fn generate(
             .head
             .forward(&state.h.unsqueeze(0)?)?;
         let logits_vec = logits.squeeze(0)?.squeeze(0)?.to_vec1::<f32>()?;
-        last_id = sample(&logits_vec, 0.8, &mut rng);
+        last_id = sample(&logits_vec, 0.6, &mut rng);
         generated.push(last_id);
     }
 
