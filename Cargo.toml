@@ -7,3 +7,4 @@ edition = "2024"
 candle-core = { version = "0.10.2", features = ["cuda"] }
 candle-nn = { version = "0.10.2", features = ["cuda"] }
 rand = "0.8"
+ratatui = "0.30.0"

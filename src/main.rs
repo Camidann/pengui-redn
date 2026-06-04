@@ -9,89 +9,68 @@ use candle_nn::{
 };
 use rand::Rng;
 
-const EMBED_SIZE: usize = 256;
-const HIDDEN_SIZE: usize = 512;
-const SEQ_LEN: usize = 32;
+pub const EMBED_SIZE: usize = 256;
+pub const HIDDEN_SIZE: usize = 512;
+const SEQ_LEN: usize = 200;
 const BATCH_SIZE: usize = 32;
 const LEARNING_RATE: f64 = 0.001;
 const EPOCHS: usize = 150;
-const GEN_LEN: usize = 50;
-const UNK_TOKEN: &str = "<UNK>";
+pub const GEN_LEN: usize = 500;
+pub const UNK_CHAR: char = '\x00';
 
-struct Tokenizer {
+pub struct Tokenizer {
     stoi: HashMap<String, u32>,
     itos: Vec<String>,
 }
 
-fn split_off_punct(word: &str) -> Vec<String> { //separo palabras de signos de puntuación así no se pegan
-    let mut pieces = Vec::new();
-    let mut current = String::new();
-    let mut kind = None;
-    for c in word.chars() {
-        let k = c.is_alphabetic();
-        match kind {
-            Some(k2) if k2 != k => {
-                pieces.push(current);
-                current = String::new();
-            }
-            _ => {}
-        }
-        current.push(c);
-        kind = Some(k);
-    }
-    if !current.is_empty() {
-        pieces.push(current);
-    }
-    pieces
-}
 
-fn tokenize(text: &str) -> Vec<String> { //convierto el texto a tokens: minúsculas, separado por espacios y puntuación
-    text.split_whitespace()
-        .flat_map(|w| split_off_punct(w))
-        .map(|t| t.to_lowercase())
+
+fn clean(text: &str) -> String {
+    text.chars()
+        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
         .collect()
 }
 
-impl Tokenizer { //construyo el vocabulario: mapeo palabra -> id y id -> palabra
-    fn new(text: &str) -> Self {
-        let mut words: Vec<String> = tokenize(text);
-        words.sort();
-        words.dedup();
-        let mut itos = vec![UNK_TOKEN.to_string()];
-        itos.extend(words);
+impl Tokenizer {
+    pub fn new(text: &str) -> Self {
+        let cleaned = clean(text);
+        let mut chars: Vec<char> = cleaned.chars().collect();
+        chars.sort();
+        chars.dedup();
+        let mut itos = vec![UNK_CHAR];
+        itos.extend(chars);
         let stoi: HashMap<String, u32> = itos
             .iter()
             .enumerate()
-            .map(|(i, w)| (w.clone(), i as u32))
+            .map(|(i, c)| (c.to_string(), i as u32))
             .collect();
-        Self { stoi, itos }
+        Self { stoi, itos: itos.iter().map(|c| c.to_string()).collect() }
     }
 
-    fn vocab_size(&self) -> usize { //cuántas palabras distintas conoce el modelo
+    pub fn vocab_size(&self) -> usize {
         self.itos.len()
     }
 
-    fn encode(&self, text: &str) -> Vec<u32> { //texto -> lista de ids
-        tokenize(text)
-            .iter()
-            .map(|w| *self.stoi.get(w).unwrap_or(&0))
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        clean(text)
+            .chars()
+            .map(|c| *self.stoi.get(&c.to_string()).unwrap_or(&0))
             .collect()
     }
 
-    fn decode(&self, ids: &[u32]) -> String { //ids -> texto de vuelta
+    pub fn decode(&self, ids: &[u32]) -> String {
         ids.iter()
             .map(|&i| self.itos[i as usize].as_str())
-            .collect::<Vec<&str>>()
-            .join(" ")
+            .collect::<String>()
     }
 
-    fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let s = self.itos.join("\n");
         fs::write(path, s)?;
         Ok(())
     }
 
-    fn load(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let s = fs::read_to_string(path)?;
         let itos: Vec<String> = s.lines().map(|l| l.to_string()).collect();
         let stoi = itos
@@ -103,21 +82,21 @@ impl Tokenizer { //construyo el vocabulario: mapeo palabra -> id y id -> palabra
     }
 }
 
-struct CharRNN {
-    embedding: Embedding,
-    lstm: LSTM,
-    head: Linear,
+pub struct CharRNN {
+    pub embedding: Embedding,
+    pub lstm: LSTM,
+    pub head: Linear,
 }
 
 impl CharRNN {
-    fn new(vocab_size: usize, vb: &VarBuilder) -> Result<Self> {
+    pub fn new(vocab_size: usize, vb: &VarBuilder) -> Result<Self> {
         let embedding = candle_nn::embedding(vocab_size, EMBED_SIZE, vb.pp("embed"))?;
         let lstm = LSTM::new(EMBED_SIZE, HIDDEN_SIZE, LSTMConfig::default(), vb.pp("lstm"))?;
         let head = candle_nn::linear(HIDDEN_SIZE, vocab_size, vb.pp("head"))?;
         Ok(Self { embedding, lstm, head })
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let x = self.embedding.forward(x)?;
         let states = self.lstm.seq(&x)?;
         let x = self.lstm.states_to_tensor(&states)?;
@@ -125,7 +104,7 @@ impl CharRNN {
     }
 }
 
-fn get_batch(data: &[u32], seq_len: usize, batch_size: usize, rng: &mut impl Rng) -> (Vec<u32>, Vec<u32>) {
+pub fn get_batch(data: &[u32], seq_len: usize, batch_size: usize, rng: &mut impl Rng) -> (Vec<u32>, Vec<u32>) {
     let max_start = data.len().saturating_sub(seq_len + 1);
     let mut xs = Vec::with_capacity(batch_size * seq_len);
     let mut ys = Vec::with_capacity(batch_size * seq_len);
@@ -137,7 +116,7 @@ fn get_batch(data: &[u32], seq_len: usize, batch_size: usize, rng: &mut impl Rng
     (xs, ys)
 }
 
-fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
+pub fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
     let mut scaled: Vec<(usize, f32)> = logits
         .iter()
         .map(|&l| (l / temperature).exp())
@@ -165,7 +144,7 @@ fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
     top.last().unwrap().0 as u32
 }
 
-fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap> {
+pub fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap> {
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
     let model = CharRNN::new(tokenizer.vocab_size(), &vb)?;
@@ -209,7 +188,7 @@ fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap>
     Ok(varmap)
 }
 
-fn generate(
+pub fn generate(
     device: &Device,
     tokenizer: &Tokenizer,
     varmap: &VarMap,
@@ -271,7 +250,7 @@ fn main() -> Result<()> {
         }
         println!("cargando modelo guardado...");
         let tokenizer = Tokenizer::load(vocab_path)?;
-        println!("vocabulario: {} palabras", tokenizer.vocab_size());
+        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
         let mut varmap = VarMap::new();
         let _model = CharRNN::new(
             tokenizer.vocab_size(),
@@ -283,7 +262,7 @@ fn main() -> Result<()> {
         let text = fs::read_to_string(&args[1])?;
         println!("caracteres: {}", text.chars().count());
         let tokenizer = Tokenizer::new(&text);
-        println!("vocabulario: {} palabras", tokenizer.vocab_size());
+        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
         let data = tokenizer.encode(&text);
         println!("tokens totales: {}", data.len());
         println!("entrenando...");
@@ -298,7 +277,7 @@ fn main() -> Result<()> {
     } else if saved_exists {
         println!("cargando modelo guardado...");
         let tokenizer = Tokenizer::load(vocab_path)?;
-        println!("vocabulario: {} palabras", tokenizer.vocab_size());
+        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
         let mut varmap = VarMap::new();
         let _model = CharRNN::new(
             tokenizer.vocab_size(),
