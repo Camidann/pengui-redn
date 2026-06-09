@@ -11,19 +11,18 @@ use rand::Rng;
 
 pub const EMBED_SIZE: usize = 256;
 pub const HIDDEN_SIZE: usize = 512;
-const SEQ_LEN: usize = 200;
-const BATCH_SIZE: usize = 32;
+const SEQ_LEN: usize = 300;
+const BATCH_SIZE: usize = 64;
 const LEARNING_RATE: f64 = 0.001;
-const EPOCHS: usize = 150;
+const EPOCHS: usize = 60;
 pub const GEN_LEN: usize = 500;
+pub const QA_LEN: usize = 400;
 pub const UNK_CHAR: char = '\x00';
 
 pub struct Tokenizer {
     stoi: HashMap<String, u32>,
     itos: Vec<String>,
 }
-
-
 
 fn clean(text: &str) -> String {
     text.chars()
@@ -158,7 +157,7 @@ pub fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<Var
         std::process::exit(1);
     }
 
-    let steps_per_epoch = (data.len() / (seq_len * batch_size)).max(20);
+    let steps_per_epoch = (data.len() / (seq_len * batch_size)).max(60);
 
     for epoch in 0..EPOCHS {
         let mut total_loss = Tensor::new(0.0f32, device)?;
@@ -184,6 +183,9 @@ pub fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<Var
             epoch,
             total_loss.to_scalar::<f32>()? / steps_per_epoch as f32
         );
+        if epoch % 5 == 0 {
+            varmap.save("modelo.safetensors").ok();
+        }
     }
     Ok(varmap)
 }
@@ -194,6 +196,7 @@ pub fn generate(
     varmap: &VarMap,
     prompt: &str,
     gen_len: usize,
+    temperature: f32,
 ) -> Result<String> {
     let vb = VarBuilder::from_varmap(varmap, DType::F32, device);
     let model = CharRNN::new(tokenizer.vocab_size(), &vb)?;
@@ -224,16 +227,88 @@ pub fn generate(
             .head
             .forward(&state.h.unsqueeze(0)?)?;
         let logits_vec = logits.squeeze(0)?.squeeze(0)?.to_vec1::<f32>()?;
-        last_id = sample(&logits_vec, 0.6, &mut rng);
+        last_id = sample(&logits_vec, temperature, &mut rng);
         generated.push(last_id);
     }
 
     Ok(tokenizer.decode(&generated))
 }
 
+fn extract_answer_section(text: &str, start_idx: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut answer = String::new();
+    let mut count = 0;
+    for line in lines[start_idx..].iter() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('>') {
+            continue;
+        }
+        if trimmed.starts_with("ACTIVIDAD") {
+            break;
+        }
+        if trimmed.starts_with("") && trimmed.len() <= 2 {
+            continue;
+        }
+        answer.push_str(trimmed);
+        answer.push(' ');
+        count += 1;
+        if count >= 15 {
+            break;
+        }
+    }
+    answer.trim().to_string()
+}
+
+fn build_qa_dataset(input_path: &str) -> Result<String> {
+    let text = fs::read_to_string(input_path)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let mut qa_entries: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        if line.contains('¿') && line.contains('?') && line.len() < 120 {
+            let question = line.trim_matches(|c| c == '' || c == ' ');
+            let answer = extract_answer_section(&text, i + 1);
+            if !answer.is_empty() && answer.len() > 10 {
+                qa_entries.push(format!(
+                    "Pregunta: {}\nRespuesta: {}\n",
+                    question, answer
+                ));
+            }
+        }
+        i += 1;
+    }
+
+    let mut combined = text.clone();
+    combined.push_str("\n\n");
+    for qa in &qa_entries {
+        combined.push_str(qa);
+        combined.push('\n');
+    }
+
+    let output_path = "contenidosTEST/qa_total.txt";
+    fs::write(output_path, &combined)?;
+    println!("Dataset guardado en {} ({} preguntas extraídas)", output_path, qa_entries.len());
+    println!("Tamaño total: {} caracteres", combined.chars().count());
+
+    Ok(combined)
+}
+
+fn strip_prefix(text: &str, prefix: &str) -> String {
+    if let Some(rest) = text.strip_prefix(prefix) {
+        rest.to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let load = args.iter().any(|a| a == "--load");
+    let ask = args.iter().any(|a| a == "--ask");
+    let build_qa = args.iter().any(|a| a == "--build-qa");
+    let resume = args.iter().any(|a| a == "--resume");
     let has_file = args.len() >= 2 && !args[1].starts_with('-');
 
     let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
@@ -243,7 +318,64 @@ fn main() -> Result<()> {
     let vocab_path = "modelo.vocab";
     let saved_exists = Path::new(model_path).exists() && Path::new(vocab_path).exists();
 
-    let (tokenizer, varmap) = if load {
+    if build_qa {
+        let input = args.get(2).cloned().unwrap_or_default();
+        if input.is_empty() {
+            eprintln!("error: necesitás un archivo de texto. Ej: --build-qa contenidosTEST/EL004338.txt");
+            std::process::exit(1);
+        }
+        build_qa_dataset(&input)?;
+        return Ok(());
+    }
+
+    let (tokenizer, varmap) = if resume {
+        if !saved_exists {
+            eprintln!("error: no hay modelo guardado para reanudar.");
+            std::process::exit(1);
+        }
+        let text = if has_file {
+            fs::read_to_string(&args[1])?
+        } else {
+            eprintln!("error: necesitás el archivo de texto. Ej: --resume contenidosTEST/train_final.txt");
+            std::process::exit(1);
+        };
+        println!("cargando modelo guardado para reanudar entrenamiento...");
+        let tokenizer = if Path::new(vocab_path).exists() {
+            Tokenizer::load(vocab_path)?
+        } else {
+            Tokenizer::new(&text)
+        };
+        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
+        let data = tokenizer.encode(&text);
+        println!("tokens totales: {}", data.len());
+        let mut varmap = VarMap::new();
+        {
+            let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+            let _model = CharRNN::new(tokenizer.vocab_size(), &vb)?;
+        }
+        varmap.load(model_path)?;
+        println!("reanudando entrenamiento...");
+        let varmap = train(&device, &tokenizer, &data)?;
+        varmap.save(model_path)?;
+        tokenizer.save(vocab_path)?;
+        println!("modelo guardado en {model_path}");
+        (tokenizer, varmap)
+    } else if ask {
+        if !saved_exists {
+            eprintln!("error: no hay modelo guardado. entrená uno primero.");
+            std::process::exit(1);
+        }
+        println!("cargando modelo guardado...");
+        let tokenizer = Tokenizer::load(vocab_path)?;
+        println!("vocabulario: {} caracteres", tokenizer.vocab_size());
+        let mut varmap = VarMap::new();
+        let _model = CharRNN::new(
+            tokenizer.vocab_size(),
+            &VarBuilder::from_varmap(&varmap, DType::F32, &device),
+        )?;
+        varmap.load(model_path)?;
+        (tokenizer, varmap)
+    } else if load {
         if !saved_exists {
             eprintln!("error: no hay modelo guardado. entrená uno primero.");
             std::process::exit(1);
@@ -288,8 +420,25 @@ fn main() -> Result<()> {
     } else {
         eprintln!("uso: {} <archivo.txt> [prompt]", args[0]);
         eprintln!("      {} --load [prompt]", args[0]);
+        eprintln!("      {} --ask <pregunta>", args[0]);
+        eprintln!("      {} --build-qa <archivo.txt>", args[0]);
         std::process::exit(1);
     };
+
+    if ask {
+        let pos = args.iter().position(|a| a == "--ask").unwrap();
+        let question = args.get(pos + 1).cloned().unwrap_or_default();
+        if question.is_empty() {
+            eprintln!("error: pasá una pregunta. Ej: --ask \"¿Qué es la literatura?\"");
+            std::process::exit(1);
+        }
+        let prompt = format!("Pregunta: {}\nRespuesta:", question);
+        println!("\n--- respuesta ---\n");
+        let output = generate(&device, &tokenizer, &varmap, &prompt, QA_LEN, 0.4)?;
+        let answer = strip_prefix(&output, &prompt);
+        println!("{}", answer.trim());
+        return Ok(());
+    }
 
     let prompt = if load {
         let pos = args.iter().position(|a| a == "--load").unwrap();
@@ -299,7 +448,7 @@ fn main() -> Result<()> {
     };
 
     println!("\n--- generacion ---\n");
-    let output = generate(&device, &tokenizer, &varmap, &prompt, GEN_LEN)?;
+    let output = generate(&device, &tokenizer, &varmap, &prompt, GEN_LEN, 0.6)?;
     println!("{output}");
 
     Ok(())
