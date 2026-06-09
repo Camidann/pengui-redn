@@ -23,6 +23,7 @@ pub struct Tokenizer {
     stoi: HashMap<String, u32>,
     itos: Vec<String>,
     unk_id: u32,
+    char_boundary: u32,
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -35,22 +36,43 @@ fn tokenize(text: &str) -> Vec<String> {
 impl Tokenizer {
     pub fn new(text: &str, vocab_size: usize) -> Self {
         let words = tokenize(text);
-        let mut freq: HashMap<String, usize> = HashMap::new();
+        let mut char_set: Vec<String> = Vec::new();
+        let mut word_freq: HashMap<String, usize> = HashMap::new();
+
         for w in &words {
-            *freq.entry(w.clone()).or_insert(0) += 1;
+            *word_freq.entry(w.clone()).or_insert(0) += 1;
+            for c in w.chars() {
+                let c_str = c.to_string();
+                if !char_set.contains(&c_str) {
+                    char_set.push(c_str.clone());
+                }
+            }
         }
-        let mut sorted: Vec<(String, usize)> = freq.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        char_set.sort();
+
+        let mut sorted_words: Vec<(String, usize)> = word_freq.into_iter().collect();
+        sorted_words.sort_by(|a, b| b.1.cmp(&a.1));
+
         let mut itos: Vec<String> = vec!["<PAD>".to_string(), "<UNK>".to_string()];
-        for (w, _) in sorted.iter().take(vocab_size - 2) {
-            itos.push(w.clone());
+        let char_boundary = (2 + char_set.len()) as u32;
+        for c in &char_set {
+            itos.push(c.clone());
         }
+        for (w, _) in sorted_words.iter() {
+            if itos.len() >= vocab_size {
+                break;
+            }
+            if !itos.contains(w) {
+                itos.push(w.clone());
+            }
+        }
+
         let stoi: HashMap<String, u32> = itos
             .iter()
             .enumerate()
             .map(|(i, w)| (w.clone(), i as u32))
             .collect();
-        Self { stoi, itos, unk_id: 1 }
+        Self { stoi, itos, unk_id: 1, char_boundary }
     }
 
     pub fn vocab_size(&self) -> usize {
@@ -59,17 +81,38 @@ impl Tokenizer {
 
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let words = tokenize(text);
-        words
-            .iter()
-            .map(|w| *self.stoi.get(w).unwrap_or(&self.unk_id))
-            .collect()
+        let mut ids = Vec::new();
+        for w in words {
+            if let Some(&id) = self.stoi.get(&w) {
+                ids.push(id);
+            } else {
+                for c in w.chars() {
+                    let c_str = c.to_string();
+                    ids.push(*self.stoi.get(&c_str).unwrap_or(&self.unk_id));
+                }
+            }
+        }
+        ids
     }
 
     pub fn decode(&self, ids: &[u32]) -> String {
-        ids.iter()
-            .map(|&i| self.itos[i as usize].as_str())
-            .collect::<Vec<&str>>()
-            .join(" ")
+        let mut parts: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < ids.len() {
+            let id = ids[i];
+            if id < self.char_boundary && id > 1 {
+                let mut chars = String::new();
+                while i < ids.len() && ids[i] < self.char_boundary && ids[i] > 1 {
+                    chars.push_str(&self.itos[ids[i] as usize]);
+                    i += 1;
+                }
+                parts.push(chars);
+            } else {
+                parts.push(self.itos[id as usize].clone());
+                i += 1;
+            }
+        }
+        parts.join(" ")
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -86,7 +129,18 @@ impl Tokenizer {
             .enumerate()
             .map(|(i, w)| (w.clone(), i as u32))
             .collect();
-        Ok(Self { stoi, itos, unk_id: 1 })
+        let char_boundary = {
+            let mut boundary = 2u32;
+            for (i, w) in itos.iter().enumerate() {
+                if i >= 2 && w.chars().count() == 1 && *w != "<PAD>" && *w != "<UNK>" {
+                    boundary = i as u32 + 1;
+                } else if i as u32 >= boundary {
+                    break;
+                }
+            }
+            boundary
+        };
+        Ok(Self { stoi, itos, unk_id: 1, char_boundary })
     }
 }
 
