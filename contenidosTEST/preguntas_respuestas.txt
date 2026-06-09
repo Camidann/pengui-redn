@@ -141,3 +141,7 @@ Respuesta: El teatro es un género literario pensado para ser representado. Incl
 
 Pregunta: ¿Qué diferencia hay entre cuento y novela?
 Respuesta: El cuento es breve, tiene pocos personajes y una sola trama. La novela es extensa, tiene múltiples personajes y tramas secundarias. El cuento se lee en una sentada; la novela requiere más tiempo.
+
+Pregunta: ¿Qué son los neutrinos? Respuesta: salir
+
+Pregunta: ¿Qué son los neutrinos? Respuesta: Son partículas subatómicas muy ligeras.

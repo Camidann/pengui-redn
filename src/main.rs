@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{self, BufRead, Write};
 use std::path::Path;
 
 use candle_core::{Device, Result, Tensor, DType};
@@ -15,9 +15,17 @@ const SEQ_LEN: usize = 64;
 const BATCH_SIZE: usize = 32;
 const LEARNING_RATE: f64 = 0.001;
 const EPOCHS: usize = 80;
+const FT_EPOCHS: usize = 15;
 pub const GEN_LEN: usize = 40;
 pub const QA_LEN: usize = 30;
 pub const VOCAB_SIZE: usize = 8192;
+
+static STOPWORDS: &[&str] = &[
+    "de", "la", "que", "el", "en", "y", "a", "los", "se", "del", "las", "un",
+    "por", "con", "no", "una", "su", "al", "lo", "como", "más", "pero", "sus",
+    "le", "ya", "este", "entre", "porque", "ese", "eso", "todo", "esta", "sin",
+    "son", "ser", "haber", "para", "qué", "era", "muy", "tan", "cada",
+];
 
 pub struct Tokenizer {
     stoi: HashMap<String, u32>,
@@ -26,11 +34,69 @@ pub struct Tokenizer {
     char_boundary: u32,
 }
 
+pub struct QAPair {
+    pub question: String,
+    pub answer: String,
+}
+
 fn tokenize(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()
+}
+
+fn extract_keywords(text: &str) -> Vec<String> {
+    tokenize(text)
+        .into_iter()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != 'á' && c != 'é' && c != 'í' && c != 'ó' && c != 'ú' && c != 'ü' && c != 'ñ').to_lowercase())
+        .filter(|w| w.len() > 2 && !STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
+fn load_qa_pairs(path: &str) -> Result<Vec<QAPair>> {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let mut pairs = Vec::new();
+    let mut current_q = String::new();
+    let mut current_a = String::new();
+    let mut in_answer = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Pregunta:") {
+            if !current_q.is_empty() && !current_a.is_empty() {
+                pairs.push(QAPair { question: current_q.clone(), answer: current_a.clone() });
+            }
+            current_q = trimmed.trim_start_matches("Pregunta:").trim().to_string();
+            current_a.clear();
+            in_answer = false;
+        } else if trimmed.starts_with("Respuesta:") {
+            current_a = trimmed.trim_start_matches("Respuesta:").trim().to_string();
+            in_answer = true;
+        } else if in_answer && !trimmed.is_empty() {
+            current_a.push(' ');
+            current_a.push_str(trimmed);
+        }
+    }
+    if !current_q.is_empty() && !current_a.is_empty() {
+        pairs.push(QAPair { question: current_q.clone(), answer: current_a.clone() });
+    }
+    Ok(pairs)
+}
+
+fn knows_topic(question: &str, qa_pairs: &[QAPair]) -> Option<String> {
+    let kw = extract_keywords(question);
+    if kw.is_empty() {
+        return None;
+    }
+    for pair in qa_pairs {
+        let qkw = extract_keywords(&pair.question);
+        let overlap: usize = kw.iter().filter(|k| qkw.contains(k)).count();
+        if overlap as f64 / kw.len() as f64 >= 0.4 {
+            return Some(pair.question.clone());
+        }
+    }
+    None
 }
 
 impl Tokenizer {
@@ -209,10 +275,13 @@ pub fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
     top[0].0 as u32
 }
 
-pub fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<VarMap> {
-    let varmap = VarMap::new();
+pub fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32], varmap: Option<&VarMap>, epochs: usize) -> Result<VarMap> {
+    let varmap = match varmap {
+        Some(vm) => vm.clone(),
+        None => VarMap::new(),
+    };
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
-    let model = WordRNN::new(tokenizer.vocab_size(), &vb)?;
+    let _model = WordRNN::new(tokenizer.vocab_size(), &vb)?;
 
     let mut opt = AdamW::new_lr(varmap.all_vars(), LEARNING_RATE)?;
     let mut rng = rand::thread_rng();
@@ -225,13 +294,13 @@ pub fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<Var
 
     let steps_per_epoch = (data.len() / (seq_len * batch_size)).max(40);
 
-    for epoch in 0..EPOCHS {
+    for epoch in 0..epochs {
         let mut total_loss = Tensor::new(0.0f32, device)?;
-        for i in 0..steps_per_epoch {
+        for _ in 0..steps_per_epoch {
             let (xs, ys) = get_batch(data, seq_len, batch_size, &mut rng);
             let xs = Tensor::from_slice(&xs, (batch_size, seq_len), device)?;
             let ys = Tensor::from_slice(&ys, (batch_size, seq_len), device)?;
-            let logits = model.forward(&xs)?;
+            let logits = _model.forward(&xs)?;
             let loss = loss::cross_entropy(
                 &logits.reshape((batch_size * seq_len, tokenizer.vocab_size()))?,
                 &ys.reshape((batch_size * seq_len,))?,
@@ -239,21 +308,51 @@ pub fn train(device: &Device, tokenizer: &Tokenizer, data: &[u32]) -> Result<Var
             opt.backward_step(&loss)?;
             total_loss = total_loss.add(&loss.detach())?;
 
-            if i > 0 && i % 100 == 0 {
+            if epoch > 0 && epoch % 10 == 0 {
                 print!(".");
                 std::io::stdout().flush().ok();
             }
         }
-        println!(
-            " epoch {:>3} loss: {:.6}",
-            epoch,
-            total_loss.to_scalar::<f32>()? / steps_per_epoch as f32
-        );
         if epoch % 5 == 0 {
-            varmap.save("modelo.safetensors").ok();
+            println!(" epoch {:>3} loss: {:.6}", epoch, total_loss.to_scalar::<f32>()? / steps_per_epoch as f32);
         }
     }
     Ok(varmap)
+}
+
+pub fn finetune_on_text(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap, text: &str, epochs: usize) -> Result<()> {
+    let data = tokenizer.encode(text);
+    if data.len() < SEQ_LEN + 1 {
+        return Ok(());
+    }
+
+    let vb = VarBuilder::from_varmap(varmap, DType::F32, device);
+    let model = WordRNN::new(tokenizer.vocab_size(), &vb)?;
+    let mut opt = AdamW::new_lr(varmap.all_vars(), 0.0005)?;
+    let mut rng = rand::thread_rng();
+    let seq_len = SEQ_LEN.min(data.len() / 2);
+    let steps = (data.len() / seq_len).max(5);
+
+    for epoch in 0..epochs {
+        let mut total_loss = Tensor::new(0.0f32, device)?;
+        for _ in 0..steps {
+            let max_start = data.len().saturating_sub(seq_len + 1);
+            let start = if max_start > 0 { rng.gen_range(0..max_start) } else { 0 };
+            let xs = Tensor::from_slice(&data[start..start + seq_len], (1, seq_len), device)?;
+            let ys = Tensor::from_slice(&data[start + 1..start + seq_len + 1], (1, seq_len), device)?;
+            let logits = model.forward(&xs)?;
+            let loss = loss::cross_entropy(
+                &logits.reshape((seq_len, tokenizer.vocab_size()))?,
+                &ys.reshape((seq_len,))?,
+            )?;
+            opt.backward_step(&loss)?;
+            total_loss = total_loss.add(&loss.detach())?;
+        }
+        if epoch % 5 == 0 {
+            println!("  ajuste {} loss: {:.4}", epoch, total_loss.to_scalar::<f32>()? / steps as f32);
+        }
+    }
+    Ok(())
 }
 
 pub fn generate(
@@ -308,10 +407,85 @@ fn strip_prefix(text: &str, prefix: &str) -> String {
     }
 }
 
+fn chat_loop(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap) -> Result<()> {
+    let qa_path = "contenidosTEST/preguntas_respuestas.txt";
+    let train_path = "contenidosTEST/train_word.txt";
+    let model_path = "modelo.safetensors";
+    let varmap = varmap.clone();
+    let mut qa_pairs = load_qa_pairs(qa_path).unwrap_or_default();
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+
+    println!("\nModo chat activo. Escribí una pregunta o 'salir' para terminar.\n");
+
+    loop {
+        print!("> ");
+        io::stdout().flush().ok();
+        let mut input = String::new();
+        if reader.read_line(&mut input).unwrap_or(0) == 0 {
+            println!();
+            break;
+        }
+        let question = input.trim().to_string();
+        if question.is_empty() {
+            continue;
+        }
+        if question == "salir" || question == "exit" {
+            break;
+        }
+
+        let known = knows_topic(&question, &qa_pairs);
+        let prompt = format!("Pregunta: {} Respuesta:", question);
+
+        if let Some(_matched_q) = known {
+            let output = generate(device, tokenizer, &varmap, &prompt, QA_LEN, 0.4)?;
+            let answer = strip_prefix(&output, &prompt);
+            println!("  {}", answer);
+        } else {
+            let kw = extract_keywords(&question);
+            let topic = kw.first().map(|s| s.as_str()).unwrap_or("eso");
+            println!("\n  No sé sobre {}. Si me explicás, aprendo.", topic);
+            println!("  (Escribí lo que sepas o dejá vacío para saltar)");
+            print!("  > ");
+            io::stdout().flush().ok();
+            let mut info = String::new();
+            if reader.read_line(&mut info).unwrap_or(0) == 0 {
+                println!();
+                break;
+            }
+            let info = info.trim().to_string();
+
+            if info == "salir" || info == "exit" {
+                break;
+            }
+
+            if !info.is_empty() {
+                let qa_entry = format!("Pregunta: {} Respuesta: {}\n", question, info);
+                fs::write(qa_path, format!("{}\n{}", fs::read_to_string(qa_path).unwrap_or_default(), qa_entry)).ok();
+                fs::write(train_path, format!("{}\n{}\n{}", fs::read_to_string(train_path).unwrap_or_default(), qa_entry, qa_entry)).ok();
+
+                println!("  Aprendiendo...");
+                finetune_on_text(device, tokenizer, &varmap, &format!("{}\n{}\n{}", qa_entry, qa_entry, qa_entry), FT_EPOCHS)?;
+                varmap.save(model_path).ok();
+                qa_pairs = load_qa_pairs(qa_path).unwrap_or_default();
+
+                let output = generate(device, tokenizer, &varmap, &prompt, QA_LEN, 0.4)?;
+                let answer = strip_prefix(&output, &prompt);
+                println!("  Ahora sé: {}", answer);
+            } else {
+                println!("  Bueno, otro día será.");
+            }
+        }
+        println!();
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let load = args.iter().any(|a| a == "--load");
     let ask = args.iter().any(|a| a == "--ask");
+    let chat = args.iter().any(|a| a == "--chat");
     let has_file = args.len() >= 2 && !args[1].starts_with('-');
 
     let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
@@ -321,7 +495,7 @@ fn main() -> Result<()> {
     let vocab_path = "modelo.vocab";
     let saved_exists = Path::new(model_path).exists() && Path::new(vocab_path).exists();
 
-    let (tokenizer, varmap) = if load || ask {
+    let (tokenizer, varmap) = if load || ask || chat {
         if !saved_exists {
             eprintln!("error: no hay modelo guardado. entrená uno primero.");
             std::process::exit(1);
@@ -345,7 +519,7 @@ fn main() -> Result<()> {
         println!("tokens totales: {}", data.len());
         println!("entrenando...");
         let start = std::time::Instant::now();
-        let varmap = train(&device, &tokenizer, &data)?;
+        let varmap = train(&device, &tokenizer, &data, None, EPOCHS)?;
         let elapsed = start.elapsed();
         println!("entrenamiento completo en {:.2?}", elapsed);
         varmap.save(model_path)?;
@@ -365,11 +539,17 @@ fn main() -> Result<()> {
         (tokenizer, varmap)
     } else {
         eprintln!("uso:");
-        eprintln!("  {} <archivo.txt>       entrenar modelo", args[0]);
-        eprintln!("  {} --load [prompt]     cargar y generar", args[0]);
-        eprintln!("  {} --ask <pregunta>    responder pregunta", args[0]);
+        eprintln!("  {} <archivo.txt>              entrenar modelo", args[0]);
+        eprintln!("  {} --load [prompt]            cargar y generar", args[0]);
+        eprintln!("  {} --ask <pregunta>           responder pregunta", args[0]);
+        eprintln!("  {} --chat                     chat interactivo", args[0]);
         std::process::exit(1);
     };
+
+    if chat {
+        chat_loop(&device, &tokenizer, &varmap)?;
+        return Ok(());
+    }
 
     if ask {
         let pos = args.iter().position(|a| a == "--ask").unwrap();
@@ -378,11 +558,21 @@ fn main() -> Result<()> {
             eprintln!("error: pasá una pregunta. Ej: --ask \"¿Qué es la literatura?\"");
             std::process::exit(1);
         }
+
+        let qa_pairs = load_qa_pairs("contenidosTEST/preguntas_respuestas.txt").unwrap_or_default();
+        let known = knows_topic(&question, &qa_pairs);
         let prompt = format!("Pregunta: {} Respuesta:", question);
-        println!("--- respuesta ---\n");
-        let output = generate(&device, &tokenizer, &varmap, &prompt, QA_LEN, 0.4)?;
-        let answer = strip_prefix(&output, &prompt);
-        println!("{}", answer);
+
+        if let Some(_matched_q) = known {
+            println!("--- respuesta ---\n");
+            let output = generate(&device, &tokenizer, &varmap, &prompt, QA_LEN, 0.4)?;
+            let answer = strip_prefix(&output, &prompt);
+            println!("{}", answer);
+        } else {
+            let kw = extract_keywords(&question);
+            let topic = kw.first().map(|s| s.as_str()).unwrap_or("eso");
+            println!("---\nNo sé sobre {}. Pasá --enseñame para enseñarme.", topic);
+        }
         return Ok(());
     }
 
