@@ -589,7 +589,7 @@ fn tui_loop(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap) -> Result<(
                                     messages.push("Error generando respuesta.".to_string());
                                 }
                             } else {
-                                messages.push("Pengui: No conozco esa pregunta. Entrená el modelo.".to_string());
+                                messages.push("Pengui: No conozco esa pregunta. Entrená el modelo".to_string());
                             }
                         }
                         input.clear();

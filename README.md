@@ -15,43 +15,11 @@ cargo run --release -- --load "en un lugar de la mancha"
 # responder una pregunta
 cargo run --release -- --ask "¿Qué es la literatura?"
 
-# chat interactivo con enseñanza automática
-cargo run --release -- --chat
-
 # interfaz TUI interactiva
 cargo run --release -- --tui
 ```
 
-Nota: los `--` antes de `--load` / `--ask` / `--chat` son para que cargo no interprete las flags.
-
-## Modo chat (`--chat`)
-
-El modo interactivo detecta si conoce el tema de la pregunta:
-
-- **Tema conocido** → responde directamente
-- **Tema desconocido** → dice "No sé sobre {tema}", pide una explicación, la aprende con fine-tuning y responde
-
-Ejemplo interactivo:
-
-```
-> ¿Qué son los neutrinos?
-
-  No sé sobre neutrinos. Si me explicás, aprendo.
-  (Escribí lo que sepas o dejá vacío para saltar)
-  > Son partículas subatómicas muy ligeras.
-  Aprendiendo...
-  Ahora sé: Son partículas subatómicas muy ligeras.
-> salir
-```
-
-### Enseñanza automática
-
-Cuando el usuario enseña algo nuevo, el modelo:
-1. Guarda el par Pregunta/Respuesta en `preguntas_respuestas.txt`
-2. Lo agrega al dataset de entrenamiento `train_word.txt`
-3. Hace fine-tuning (15 épocas, lr reducido 0.0005)
-4. Guarda los pesos actualizados en `modelo.safetensors`
-5. Re-responde usando el modelo actualizado
+Nota: los `--` antes de `--load` / `--ask` / son para que cargo no interprete las flags.
 
 ### Detección de ignorancia
 
@@ -127,6 +95,30 @@ Los pares Q&A están en `contenidosTEST/preguntas_respuestas.txt` y cubren:
 6. optimiza con **AdamW** (lr=0.001)
 7. repite 80 épocas, guardando checkpoint cada 5
 
+## Aumentar dataset y scripts
+
+Para mejorar la cobertura de preguntas conviene generar un dataset aumentado que combine textos grandes y repita los pares Q&A. Hay dos utilidades incluidas:
+
+- Binario en Rust: `src/bin/augment_train.rs` (misma funcionalidad)
+  Uso:
+  ```bash
+  cargo run --bin augment_train -- --repeats 30
+  ```
+
+Ambos generan el archivo `contenidosTEST/train_augmented.txt`. Luego entrená con ese archivo:
+
+```bash
+cargo run --release -- contenidosTEST/train_augmented.txt
+```
+
+Recomendaciones:
+- Repetir cada par Q&A entre 20–50 veces para favorecer la memorización del modelo.
+- Añadí más fuentes (FAQs, artículos, Wikipedia en español) para ampliar cobertura.
+- Generá parafraseos de las preguntas cuando sea posible (sinónimos, orden distinto).
+- Si tenés GPU, entrená en `--release` y confirmá que `Device::cuda_if_available` detecte CUDA.
+- Si el dataset aumenta mucho, incrementá `EPOCHS` en `src/main.rs` o entrená más épocas.
+
+
 ## Archivos
 
 | Archivo | Qué tiene |
@@ -141,7 +133,7 @@ Los pares Q&A están en `contenidosTEST/preguntas_respuestas.txt` y cubren:
 ## Requisitos
 
 - Rust edition 2024
-- GPU NVIDIA con CUDA (si no tiene usa CPU)
+- GPU NVIDIA con CUDA (si no tiene elimina el ["cuda"] de cargo.toml CPU)
 - `candle-core`, `candle-nn`, `rand`
 
 ## Estructura del código
