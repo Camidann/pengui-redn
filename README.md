@@ -1,9 +1,7 @@
 
 # pengui-redn
 
-Generador de texto con LSTM hecho en **Rust + Candle**. Ahora con tokenización **word-level** y modo **Q&A**.
-
-El modelo aprende de textos en español y puede responder preguntas entrenado con pares `Pregunta: ... Respuesta: ...`.
+Generador de texto con LSTM hecho en **Rust + Candle**. Tokenización **word-level** con fallback a caracteres, modo **Q&A**, detección de ignorancia y aprendizaje interactivo.
 
 ## Cómo se usa
 
@@ -11,50 +9,88 @@ El modelo aprende de textos en español y puede responder preguntas entrenado co
 # entrenar con un archivo de texto
 cargo run --release -- libro.txt
 
-# cargar modelo guardado y generar texto
+# generar texto desde un prompt
 cargo run --release -- --load "en un lugar de la mancha"
 
-# responder una pregunta (modo Q&A)
+# responder una pregunta
 cargo run --release -- --ask "¿Qué es la literatura?"
+
+# chat interactivo con enseñanza automática
+cargo run --release -- --chat
 ```
 
-Nota: los `--` antes de `--load` / `--ask` son para que cargo no interprete las flags.
+Nota: los `--` antes de `--load` / `--ask` / `--chat` son para que cargo no interprete las flags.
 
-## Modo Q&A
+## Modo chat (`--chat`)
 
-El modelo se entrena con pares en formato `Pregunta: ... Respuesta: ...`. Durante inferencia con `--ask`, envuelve la pregunta en ese formato y genera la respuesta palabra por palabra.
+El modo interactivo detecta si conoce el tema de la pregunta:
 
-### Ejemplos de respuesta
+- **Tema conocido** → responde directamente
+- **Tema desconocido** → dice "No sé sobre {tema}", pide una explicación, la aprende con fine-tuning y responde
+
+Ejemplo interactivo:
+
+```
+> ¿Qué son los neutrinos?
+
+  No sé sobre neutrinos. Si me explicás, aprendo.
+  (Escribí lo que sepas o dejá vacío para saltar)
+  > Son partículas subatómicas muy ligeras.
+  Aprendiendo...
+  Ahora sé: Son partículas subatómicas muy ligeras.
+> salir
+```
+
+### Enseñanza automática
+
+Cuando el usuario enseña algo nuevo, el modelo:
+1. Guarda el par Pregunta/Respuesta en `preguntas_respuestas.txt`
+2. Lo agrega al dataset de entrenamiento `train_word.txt`
+3. Hace fine-tuning (15 épocas, lr reducido 0.0005)
+4. Guarda los pesos actualizados en `modelo.safetensors`
+5. Re-responde usando el modelo actualizado
+
+### Detección de ignorancia
+
+Usa superposición de palabras clave (≥40%) contra las preguntas conocidas. Si el solapamiento es menor, responde "No sé sobre {tema}" en vez de alucinar.
+
+## Modo consulta (`--ask`)
+
+Responde una pregunta puntual. Si el tema es desconocido, avisa sin alucinar:
 
 ```
 $ cargo run --release -- --ask "¿Qué es la literatura?"
 → La literatura es el arte de la expresión escrita u oral. Comprende obras como novelas,
   cuentos, poesías y obras teatrales.
 
-$ cargo run --release -- --ask "¿Quién es Don Quijote?"
-→ Don Quijote es el protagonista de la novela de Cervantes. Es un hidalgo de unos
-  cincuenta años que se vuelve loco por leer libros de caballerías.
-
-$ cargo run --release -- --ask "¿Qué es un dialecto?"
-→ El dialecto es la variedad del lenguaje determinada por la ubicación geográfica del
-  hablante. Existen diferencias entre países, y también entre el dialecto rural y el urbano.
+$ cargo run --release -- --ask "¿Qué es la química cuántica?"
+→ No sé sobre química. Pasá --enseñame para enseñarme.
 ```
+
+## Tokenizer híbrido
+
+El vocabulario se divide en dos zonas:
+- **Índices 2..char_boundary**: caracteres individuales (para palabras desconocidas)
+- **Índices char_boundary..vocab_size**: palabras completas más frecuentes (hasta 8192)
+
+Al codificar, las palabras conocidas van como un solo token. Las desconocidas se descomponen en sus caracteres. Al decodificar, caracteres consecutivos se reagrupan en una sola palabra.
 
 ## Pipeline
 
 ```
-texto → Tokenizer (word) → IDs → Embedding → LSTM → Linear → Logits → Sample → texto generado
+texto → Tokenizer (word + char) → IDs → Embedding(512) → LSTM(1024) → Linear → Logits → Sample → texto
 ```
 
 ## Componentes
 
 | Componente | Qué hace | Dimensiones |
 |---|---|---|
-| **Tokenizer** | pasa texto a IDs palabra por palabra | palabra ↔ u32 |
+| **Tokenizer** | pasa texto a IDs: palabras completas o caracteres | palabra/carácter ↔ u32 |
 | **Embedding** | convierte cada ID en un vector aprendido | (vocab_size, 512) |
 | **LSTM** | procesa secuencias con memoria interna | 512 → 1024 (hidden) |
 | **Head (Linear)** | transforma la memoria en puntajes por palabra | (1024, vocab_size) |
-| **Sample** | elige la siguiente palabra según probabilidad (top-40 + temperatura) | logits → token ID |
+| **Sample** | elige la siguiente palabra (top-40 + temperatura) | logits → token ID |
+| **knows_topic** | detecta si el tema es conocido por keywords | solapamiento ≥40% |
 
 ## Datos de entrenamiento
 
@@ -71,10 +107,10 @@ Los pares Q&A están en `contenidosTEST/preguntas_respuestas.txt` y cubren:
 ## Entrenamiento
 
 1. tokeniza el texto en palabras (split por espacios)
-2. construye vocabulario con las 8192 palabras más frecuentes
-3. agarra bloques de 64 palabras (`SEQ_LEN`)
+2. construye vocabulario híbrido: caracteres únicos + 8192 palabras más frecuentes
+3. agarra bloques de 64 tokens (`SEQ_LEN`)
 4. procesa 32 bloques por lote (`BATCH_SIZE`)
-5. calcula cross-entropy entre predicción y palabra real
+5. calcula cross-entropy entre predicción y token real
 6. optimiza con **AdamW** (lr=0.001)
 7. repite 80 épocas, guardando checkpoint cada 5
 
@@ -83,8 +119,8 @@ Los pares Q&A están en `contenidosTEST/preguntas_respuestas.txt` y cubren:
 | Archivo | Qué tiene |
 |---|---|
 | `modelo.safetensors` | pesos del modelo entrenado (word-level) |
-| `modelo.vocab` | vocabulario (una palabra por línea) |
-| `contenidosTEST/preguntas_respuestas.txt` | 50 pares Pregunta/Respuesta curados |
+| `modelo.vocab` | vocabulario híbrido (caracteres + palabras, uno por línea) |
+| `contenidosTEST/preguntas_respuestas.txt` | pares Pregunta/Respuesta (se actualiza al enseñar) |
 | `contenidosTEST/train_word.txt` | dataset combinado para entrenar |
 | `contenidosTEST/EL004338.txt` | libro de texto fuente |
 | `contenidosTEST/el_quijote.txt` | Quijote fuente |
@@ -99,15 +135,19 @@ Los pares Q&A están en `contenidosTEST/preguntas_respuestas.txt` y cubren:
 
 ```
 src/main.rs
-├── Tokenizer    - tokenización word-level con vocabulario limitado
-├── WordRNN      - modelo (embedding 512 + LSTM 1024 + linear head)
-├── get_batch    - muestrea bloques aleatorios para entrenar
-├── sample       - sampleo con temperatura + top-40
-├── train        - loop de entrenamiento con checkpoints
-├── generate     - genera texto autoregresivamente
-└── main         - CLI: --load, --ask
+├── Tokenizer        - tokenización híbrida (word + char)
+├── WordRNN          - modelo (embedding 512 + LSTM 1024 + linear head)
+├── get_batch        - muestrea bloques aleatorios para entrenar
+├── sample           - sampleo con temperatura + top-40
+├── train            - loop de entrenamiento con checkpoints
+├── generate         - genera texto autoregresivamente
+├── finetune_on_text - fine-tuning rápido sobre texto nuevo
+├── knows_topic      - detección de temas conocidos por keywords
+├── chat_loop        - modo interactivo con enseñanza
+├── extract_keywords - extrae palabras clave (filtra stopwords)
+└── main             - CLI: --load, --ask, --chat
 ```
 
 ## Disclaimer
 
-Proyecto didáctico. El modelo responde bien preguntas que ya vio en entrenamiento (porque las memoriza), pero no entiende semántica. Para preguntas nuevas puede alucinar o dar respuestas incorrectas.
+Proyecto didáctico. El modelo responde bien preguntas que ya vio en entrenamiento (las memoriza), pero no entiende semántica. Para temas nuevos dice "no sé" en vez de alucinar.
