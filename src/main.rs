@@ -498,7 +498,7 @@ fn tui_loop(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap) -> Result<(
     let mut messages = vec![
         "Bienvenido a Pengui TUI de Pengui-Redn.".to_string(),
         "Escribí una pregunta y presioná Enter para generar una respuesta.".to_string(),
-        "Presioná Esc o q para salir.".to_string(),
+        "Presioná Esc para salir.".to_string(),
     ];
 
     let mut stdout = io::stdout();
@@ -589,7 +589,7 @@ fn tui_loop(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap) -> Result<(
                                     messages.push("Error generando respuesta.".to_string());
                                 }
                             } else {
-                                messages.push("Pengui: No conozco esa pregunta. Entrená el modelo o usá --chat.".to_string());
+                                messages.push("Pengui: No conozco esa pregunta. Entrená el modelo.".to_string());
                             }
                         }
                         input.clear();
