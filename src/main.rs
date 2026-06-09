@@ -2,11 +2,21 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::time::Duration;
 
 use candle_core::{Device, Result, Tensor, DType};
 use candle_nn::{
     loss, AdamW, Embedding, Linear, LSTM, LSTMConfig, Module, Optimizer, RNN, VarBuilder, VarMap,
 };
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Color, Style};
+use ratatui::text::Text;
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Terminal;
 use rand::Rng;
 
 pub const EMBED_SIZE: usize = 512;
@@ -481,11 +491,134 @@ fn chat_loop(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap) -> Result<
     Ok(())
 }
 
+fn tui_loop(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap) -> Result<()> {
+    let qa_path = "contenidosTEST/preguntas_respuestas.txt";
+    let qa_pairs = load_qa_pairs(qa_path).unwrap_or_default();
+    let mut input = String::new();
+    let mut messages = vec![
+        "Bienvenido a Pengui TUI de Pengui-Redn.".to_string(),
+        "Escribí una pregunta y presioná Enter para generar una respuesta.".to_string(),
+        "Presioná Esc o q para salir.".to_string(),
+    ];
+
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    enable_raw_mode()?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut should_quit = false;
+
+    while !should_quit {
+        terminal.draw(|f| {
+            let size = f.size();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(1)
+                .constraints([
+                    Constraint::Min(5),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                ])
+                .split(size);
+
+            let history = Paragraph::new(Text::from(messages.join("\n")))
+                .block(Block::default().borders(Borders::ALL).title("Historial"))
+                .wrap(Wrap { trim: true });
+            f.render_widget(history, chunks[0]);
+
+            let input_paragraph = Paragraph::new(input.as_str())
+                .block(Block::default().borders(Borders::ALL).title("Entrada"))
+                .style(Style::default().fg(Color::Yellow));
+            f.render_widget(input_paragraph, chunks[1]);
+            f.set_cursor(
+                chunks[1].x + input.len() as u16 + 1,
+                chunks[1].y + 1,
+            );
+
+            let help = Paragraph::new(Text::from(
+                "Enter: enviar  Esc/q: salir  Ctrl+C: forzar salida",
+            ))
+            .block(Block::default().borders(Borders::ALL).title("Ayuda"));
+            f.render_widget(help, chunks[2]);
+        })?;
+
+        if event::poll(Duration::from_millis(200))? {
+            match event::read()? {
+                Event::Key(key) => match key.code {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        should_quit = true;
+                    }
+                    KeyCode::Char('q') if key.modifiers.is_empty() => {
+                        should_quit = true;
+                    }
+                    KeyCode::Esc => {
+                        should_quit = true;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Enter => {
+                        let question = input.trim().to_string();
+                        if !question.is_empty() {
+                            messages.push(format!("> {question}"));
+                            let prompt = format!("Pregunta: {question} Respuesta:");
+                            if let Some(_matched_q) = knows_topic(&question, &qa_pairs) {
+                                messages.push("Generando respuesta...".to_string());
+                                terminal.draw(|f| {
+                                    let size = f.size();
+                                    let chunks = Layout::default()
+                                        .direction(Direction::Vertical)
+                                        .margin(1)
+                                        .constraints([
+                                            Constraint::Min(5),
+                                            Constraint::Length(3),
+                                            Constraint::Length(3),
+                                        ])
+                                        .split(size);
+                                    let history = Paragraph::new(Text::from(messages.join("\n")))
+                                        .block(Block::default().borders(Borders::ALL).title("Historial"))
+                                        .wrap(Wrap { trim: true });
+                                    f.render_widget(history, chunks[0]);
+                                    let input_paragraph = Paragraph::new(input.as_str())
+                                        .block(Block::default().borders(Borders::ALL).title("Entrada"));
+                                    f.render_widget(input_paragraph, chunks[1]);
+                                })?;
+                                if let Ok(output) = generate(device, tokenizer, &varmap, &prompt, QA_LEN, 0.4) {
+                                    let answer = strip_prefix(&output, &prompt);
+                                    messages.push(format!("Pengui: {answer}"));
+                                } else {
+                                    messages.push("Error generando respuesta.".to_string());
+                                }
+                            } else {
+                                messages.push("Pengui: No conozco esa pregunta. Entrená el modelo o usá --chat.".to_string());
+                            }
+                        }
+                        input.clear();
+                    }
+                    KeyCode::Char(c) => {
+                        input.push(c);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let load = args.iter().any(|a| a == "--load");
     let ask = args.iter().any(|a| a == "--ask");
     let chat = args.iter().any(|a| a == "--chat");
+    let tui = args.iter().any(|a| a == "--tui");
     let has_file = args.len() >= 2 && !args[1].starts_with('-');
 
     let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
@@ -495,7 +628,7 @@ fn main() -> Result<()> {
     let vocab_path = "modelo.vocab";
     let saved_exists = Path::new(model_path).exists() && Path::new(vocab_path).exists();
 
-    let (tokenizer, varmap) = if load || ask || chat {
+    let (tokenizer, varmap) = if load || ask || chat || tui {
         if !saved_exists {
             eprintln!("error: no hay modelo guardado. entrená uno primero.");
             std::process::exit(1);
@@ -543,11 +676,17 @@ fn main() -> Result<()> {
         eprintln!("  {} --load [prompt]            cargar y generar", args[0]);
         eprintln!("  {} --ask <pregunta>           responder pregunta", args[0]);
         eprintln!("  {} --chat                     chat interactivo", args[0]);
+        eprintln!("  {} --tui                      iniciar interfaz TUI", args[0]);
         std::process::exit(1);
     };
 
     if chat {
         chat_loop(&device, &tokenizer, &varmap)?;
+        return Ok(());
+    }
+
+    if tui {
+        tui_loop(&device, &tokenizer, &varmap)?;
         return Ok(());
     }
 
