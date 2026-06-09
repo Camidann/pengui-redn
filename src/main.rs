@@ -538,7 +538,7 @@ fn tui_loop(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap) -> Result<(
             );
 
             let help = Paragraph::new(Text::from(
-                "Enter: enviar  Esc/q: salir  Ctrl+C: forzar salida",
+                "Enter: enviar  Esc: salir  Ctrl+C: forzar salida",
             ))
             .block(Block::default().borders(Borders::ALL).title("Ayuda"));
             f.render_widget(help, chunks[2]);
@@ -548,9 +548,6 @@ fn tui_loop(device: &Device, tokenizer: &Tokenizer, varmap: &VarMap) -> Result<(
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        should_quit = true;
-                    }
-                    KeyCode::Char('q') if key.modifiers.is_empty() => {
                         should_quit = true;
                     }
                     KeyCode::Esc => {
@@ -675,7 +672,6 @@ fn main() -> Result<()> {
         eprintln!("  {} <archivo.txt>              entrenar modelo", args[0]);
         eprintln!("  {} --load [prompt]            cargar y generar", args[0]);
         eprintln!("  {} --ask <pregunta>           responder pregunta", args[0]);
-        eprintln!("  {} --chat                     chat interactivo", args[0]);
         eprintln!("  {} --tui                      iniciar interfaz TUI", args[0]);
         std::process::exit(1);
     };

@@ -17,6 +17,9 @@ cargo run --release -- --ask "¿Qué es la literatura?"
 
 # chat interactivo con enseñanza automática
 cargo run --release -- --chat
+
+# interfaz TUI interactiva
+cargo run --release -- --tui
 ```
 
 Nota: los `--` antes de `--load` / `--ask` / `--chat` son para que cargo no interprete las flags.
@@ -53,6 +56,16 @@ Cuando el usuario enseña algo nuevo, el modelo:
 ### Detección de ignorancia
 
 Usa superposición de palabras clave (≥40%) contra las preguntas conocidas. Si el solapamiento es menor, responde "No sé sobre {tema}" en vez de alucinar.
+
+## Modo TUI (`--tui`)
+
+El modo TUI abre una interfaz de terminal interactiva con:
+- historial de preguntas y respuestas
+- campo de entrada en tiempo real
+- ayuda en pantalla
+- salida con `Esc`, `q` o `Ctrl+C`
+
+Requiere un modelo ya entrenado guardado en `modelo.safetensors` y `modelo.vocab`.
 
 ## Modo consulta (`--ask`)
 
@@ -145,7 +158,7 @@ src/main.rs
 ├── knows_topic      - detección de temas conocidos por keywords
 ├── chat_loop        - modo interactivo con enseñanza
 ├── extract_keywords - extrae palabras clave (filtra stopwords)
-└── main             - CLI: --load, --ask, --chat
+└── main             - CLI: --load, --ask, --chat, --tui
 ```
 
 ## Disclaimer
