@@ -6,17 +6,30 @@ Generador de texto con LSTM hecho en **Rust + Candle**. Tokenización **word-lev
 ## Cómo se usa
 
 ```bash
-# entrenar con un archivo de texto
-cargo run --release -- libro.txt
+# Nota: este paquete define dos binarios: `pengui-redn` y `augment_train`.
+# Cuando haya más de un binario, especificá cuál usar con `--bin <name>`.
 
-# generar texto desde un prompt
-cargo run --release -- --load "en un lugar de la mancha"
+# entrenar con un archivo de texto (release)
+# especificá el binario `pengui-redn` y pon `--` antes de los args del programa
+cargo run --release --bin pengui-redn -- contenidosTEST/train_augmented.txt
 
-# responder una pregunta
-cargo run --release -- --ask "¿Qué es la literatura?"
+# generar texto desde un prompt (release)
+cargo run --release --bin pengui-redn -- --load "en un lugar de la mancha"
 
-# interfaz TUI interactiva
-cargo run --release -- --tui
+# responder una pregunta (release)
+cargo run --release --bin pengui-redn -- --ask "¿Qué es la literatura?"
+
+# interfaz TUI interactiva (release)
+cargo run --release --bin pengui-redn -- --tui
+
+# ejecutar el binario ya compilado (release)
+target/release/pengui-redn --tui
+
+# Generar dataset aumentado (Rust) — ejecuta el binario `augment_train`
+cargo run --bin augment_train -- --repeats 30
+
+# Alternativa: script Python para augmentación
+python3 scripts/augment_train.py --repeats 30
 ```
 
 Nota: los `--` antes de `--load` / `--ask` / son para que cargo no interprete las flags.
